@@ -1,0 +1,51 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-commits:
+    name: Validate Commit Messages
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit message format
+        run: |
+          # Enforce: type(scope): message  — conventional commits
+          git log --oneline ${{ github.event.pull_request.base.sha }}..HEAD | while read line; do
+            echo "Checking: $line"
+            if ! echo "$line" | grep -qE "^[a-f0-9]+ (feat|fix|docs|style|refactor|test|chore|ci|build)(\(.+\))?: .+"; then
+              echo "::error::Commit message does not follow Conventional Commits: $line"
+              exit 1
+            fi
+          done
+
+  format-check:
+    name: Clang-Format Check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          find src tests -name "*.cpp" -o -name "*.hpp" | \
+          xargs clang-format --dry-run --Werror --style=file
+
+  build-check:
+    name: Quick Build Sanity
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: cd build && ctest --output-on-failure

@@ -1,0 +1,197 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+
+# Cancel in-progress runs on the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  ARTIFACT_NAME: app_config_manager
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 1: Build & Test (matrix: Ubuntu + Windows)
+  # ─────────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+        build_type: [Debug, Release]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-cmake-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-${{ matrix.build_type }}-
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DENABLE_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Run Unit Tests
+        working-directory: build
+        run: ctest --output-on-failure --build-config ${{ matrix.build_type }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.build_type }}
+          path: build/Testing/
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 2: Static Analysis (Linux only)
+  # ─────────────────────────────────────────────────────────────────
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=all \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            src/
+
+      - name: Install clang-tidy
+        run: sudo apt-get install -y clang-tidy
+
+      - name: Configure for clang-tidy
+        run: |
+          cmake -B build-tidy \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DENABLE_TESTING=OFF
+
+      - name: Run clang-tidy
+        run: |
+          clang-tidy \
+            -p build-tidy \
+            src/*.cpp \
+            -- -std=c++17
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 3: Code Coverage (Linux Debug only)
+  # ─────────────────────────────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lcov
+        run: sudo apt-get install -y lcov
+
+      - name: Configure with coverage
+        run: |
+          cmake -B build-cov \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TESTING=ON \
+            -DENABLE_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build-cov --parallel
+
+      - name: Run tests
+        working-directory: build-cov
+        run: ctest --output-on-failure
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture \
+               --directory build-cov \
+               --output-file coverage.info \
+               --ignore-errors mismatch
+          lcov --remove coverage.info \
+               '/usr/*' \
+               '*/googletest/*' \
+               '*/tests/*' \
+               --output-file coverage.info
+          lcov --list coverage.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.info
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 4: Package & Release (only on git tag / release)
+  # ─────────────────────────────────────────────────────────────────
+  package:
+    name: Package Release
+    runs-on: ubuntu-22.04
+    needs: [build-and-test, static-analysis]
+    if: github.event_name == 'release'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Release Build
+        run: |
+          cmake -B build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTING=OFF \
+            -DCMAKE_INSTALL_PREFIX=dist
+
+      - name: Build Release
+        run: cmake --build build-release --parallel
+
+      - name: Install to dist/
+        run: cmake --install build-release
+
+      - name: Package as tarball
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          tar -czf ${{ env.ARTIFACT_NAME }}-${VERSION}-linux-x64.tar.gz -C dist .
+          sha256sum ${{ env.ARTIFACT_NAME }}-${VERSION}-linux-x64.tar.gz > checksums.txt
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: |
+            *.tar.gz
+            checksums.txt
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.tar.gz
+            checksums.txt

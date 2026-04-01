@@ -1,0 +1,41 @@
+# Build directories
+build/
+build-*/
+dist/
+out/
+
+# CMake generated
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+coverage.info
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Packages
+*.tar.gz
+*.zip
